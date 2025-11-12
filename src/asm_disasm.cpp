@@ -1,7 +1,3 @@
-// This is a personal academic project. Dear PVS-Studio, please check it.
-// PVS-Studio Static Code Analyzer for C, C++, C#, and Java: http://www.viva64.com
-
-
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -89,8 +85,6 @@ static word_t parse_kyiv_number(const char* str) {
 }
 
 int disassembly(const uint64_t & command_oct, Kyiv_memory_t & kmem, const addr3_t &addr3) {
-
-//    std::cout << command_oct << std::endl;
     std::ostringstream str;
     str << std::oct << command_oct;
     std::string command = str.str();
