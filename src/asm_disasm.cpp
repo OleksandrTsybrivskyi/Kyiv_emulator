@@ -79,6 +79,15 @@ std::map <std::string, std::string> ua_instructions = {
         {"останов",  "33"}
 };
 
+static word_t parse_kyiv_number(const char* str) {
+    long long val = std::stoll(str);
+    if (val < 0) {
+        word_t mask_41_bit = (1ULL << 40);
+        return static_cast<word_t>(-val) | mask_41_bit;
+    }
+    return static_cast<word_t>(val);
+}
+
 int disassembly(const uint64_t & command_oct, Kyiv_memory_t & kmem, const addr3_t &addr3) {
 
 //    std::cout << command_oct << std::endl;
@@ -482,7 +491,7 @@ int main(int argc, char *argv[]) {
         std::cerr<< "./kyivemu removable_memory <file> (<reg1>,<num1>) ... <C_reg> "<< std::endl;
         std::filesystem::path docPath = std::filesystem::current_path() / "../documentation/documentation.txt";
         std::cerr << "For a list of supported commands and detailed instructions, please refer to the documentation file: "
-                  << "<a href=\"file://" << docPath.string() << "\">documentation.txt</a>." << std::endl;
+                << "<a href=\"file://" << docPath.string() << "\">documentation.txt</a>." << std::endl;
         return -1;
     }
     std::string mode = argv[1];
@@ -493,9 +502,9 @@ int main(int argc, char *argv[]) {
             return -1;
         }
 
-        word_t num1 = std::stoull(argv[2]);
-        word_t num2 = std::stoull(argv[3]);
-        opcode_t operation_code = std::stoi(argv[4]);
+        word_t num1 = parse_kyiv_number(argv[2]);
+        word_t num2 = parse_kyiv_number(argv[3]);
+        opcode_t operation_code = std::stoi(argv[4], nullptr, 8); //ОСЬ ТУТ БАВ БАГ!!!
 
         machine.kmem.write_memory(00001, num1);
         machine.kmem.write_memory(00002, num2);
@@ -511,7 +520,7 @@ int main(int argc, char *argv[]) {
 
         while (machine.execute_opcode()) {
             std::cout << "Result: "
-                      << word_to_number(machine.kmem.read_memory(00003)) * pow(2, -40)
+                      << word_to_number(machine.kmem.read_memory(00003))
                       << "\n\n";
         }
 
@@ -616,6 +625,9 @@ int main(int argc, char *argv[]) {
         while (machine.execute_opcode()) {
             std::cout << "Result: "
                       << word_to_number(machine.kmem.read_memory(00003)) * pow(2, -40)
+                      << "\n\n" << std::endl;
+            std::cout << "Result (Decimal): "
+                      << word_to_number(machine.kmem.read_memory(00003))
                       << "\n\n";
         }
     }else {
