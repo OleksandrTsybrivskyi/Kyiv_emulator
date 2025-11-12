@@ -1,638 +1,759 @@
 // This is a personal academic project. Dear PVS-Studio, please check it.
 // PVS-Studio Static Code Analyzer for C, C++, C#, and Java: http://www.viva64.com
 
-
+#include <iostream>
+#include <cstdint>
+#include <cmath>
+#include <cassert>
+#include <bitset>
 #include <fstream>
-#include <iomanip>
-#include <map>
-#include <filesystem>
+#include <regex>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
+#include <boost/multiprecision/float128.hpp>
 #include "kyiv.h"
 #include "asm_disasm.h"
+typedef uint64_t addr_t;
+typedef uint64_t word_t;
+typedef int64_t  signed_word_t;
+typedef uint32_t opcode_t;
+typedef boost::multiprecision::int128_t mul_word_t;
 
-#define COMMAND_SIZE 4
 
-constexpr char outputf[] = "../punched_tape.txt";
+constexpr addr3_t word_to_addr3(word_t w){
+    constexpr word_t Addr_1_mask_shift = (40-6-11)+1;
+    constexpr word_t Addr_1_mask = 0b11'111'111'111ULL << (Addr_1_mask_shift);  // also was -1
+    constexpr word_t Addr_2_mask_shift = (40-6-12-11)+1;
+    constexpr word_t Addr_2_mask = 0b11'111'111'111ULL << (Addr_2_mask_shift);  // also was -1
+    constexpr word_t Addr_3_mask_shift = 0; // Для одноманітності
+    constexpr word_t Addr_3_mask = 0b11'111'111'111ULL;
 
-std::map <std::string, std::string> en_instructions = {
-        {"add",  "01"},
-        {"sub",  "02"},
-        {"addcmd",  "03"},
-        {"suba", "06"},
-        {"addcyc",  "07"},
-        {"mul",  "10"},
-        {"rmul", "11"},
-        {"div",  "12"},
-        {"sh",  "13"},
-        {"and",  "15"},
-        {"or",  "14"},
-        {"xor",  "17"},
-        {"norm", "35"},
-        {"jle",  "04"},
-        {"jlea",  "05"},
-        {"je", "16"},
-        {"nfork",  "30"},
-        {"ncall",  "31"},
-        {"ret", "32"},
-        {"gob",  "26"},
-        {"goe",  "27"},
-        {"fop", "34"},
-        {"rdt",  "20"},
-        {"rbn",  "21"},
-        {"wbn", "22"},
-        {"wmd",  "23"},
-        {"rmd",  "24"},
-        {"imd", "25"},
-        {"ostanov",  "33"}
-};
+    addr3_t res;
+    res.source_1    = (w & Addr_1_mask) >> Addr_1_mask_shift;
+    res.source_2    = (w & Addr_2_mask) >> Addr_2_mask_shift;
+    res.destination = (w & Addr_3_mask);
+    return res;
+}
 
-std::map <std::string, std::string> ua_instructions = {
-        {"дод",  "01"},
-        {"від",  "02"},
-        {"обк",  "03"},
-        {"авід", "06"},
-        {"цдод",  "07"},
-        {"множ",  "10"},
-        {"замнож", "11"},
-        {"діл",  "12"},
-        {"зсв",  "13"},
-        {"і",  "15"},
-        {"або",  "14"},
-        {"вабо",  "17"},
-        {"норм", "35"},
-        {"кмр",  "04"},
-        {"кмра",  "05"},
-        {"кр", "16"},
-        {"упп",  "30"},
-        {"упч",  "31"},
-        {"прп", "32"},
-        {"пго",  "26"},
-        {"кго",  "27"},
-        {"фікс", "34"},
-        {"чдн",  "20"},
-        {"чбн",  "21"},
-        {"дру", "22"},
-        {"мбз",  "23"},
-        {"мбч",  "24"},
-        {"мбп", "25"},
-        {"останов",  "33"}
-};
+constexpr opcode_t word_to_opcode(word_t w) {
+    constexpr word_t op_code_shift = (40-5)+1;
+    constexpr word_t op_code_mask = 0b11'111ULL << (op_code_shift);
+    return (w & op_code_mask) >> op_code_shift;
+}
+
+static constexpr word_t mask_40_bits = (1ULL << 40) - 1; // 0b111...11 -- 40 1-bits, std::pow(2, 41) === 1 << 41
+static constexpr word_t mask_41_bit = (1ULL << 40);      // 0b1000...00 -- 40 zeros after the 1
+
+
+constexpr bool is_negative(word_t w){
+    return w & mask_41_bit; // 0 - додатнє, не нуль -- від'ємне
+}
+
+constexpr word_t to_negative(word_t w){
+    return w | mask_41_bit;
+}
+
+constexpr word_t to_positive(word_t w){
+    return w & (~mask_41_bit);
+}
+
+constexpr uint16_t leftmost_one(word_t w){
+    uint16_t ct = 0;
+    while (w > 1) {
+        ct++;
+        w = w >> 1;
+    }
+    return ct;
+}
+
+//hz looks like kostyl but whatever
+uint16_t leftmost_one(mul_word_t w){
+    uint16_t ct = 0;
+    while (w > 1) {
+        ct++;
+        w = w >> 1;
+    }
+    return ct;
+}
+
+signed_word_t get_absolute(word_t w){
+    return static_cast<signed_word_t>(w & mask_40_bits);
+}
+
+signed_word_t word_to_number(word_t w){
+    signed_word_t sign1 = (is_negative(w) ? -1 : 1);
+    signed_word_t abs_val1 = get_absolute(w);
+    return sign1 * abs_val1;
+}
 
 static word_t parse_kyiv_number(const char* str) {
     long long val = std::stoll(str);
     if (val < 0) {
-        word_t mask_41_bit = (1ULL << 40);
-        return static_cast<word_t>(-val) | mask_41_bit;
+        return to_negative(static_cast<word_t>(-val));
     }
     return static_cast<word_t>(val);
 }
 
-int disassembly(const uint64_t & command_oct, Kyiv_memory_t & kmem, const addr3_t &addr3) {
-
-//    std::cout << command_oct << std::endl;
-    std::ostringstream str;
-    str << std::oct << command_oct;
-    std::string command = str.str();
-
-    if (command.size() != 13 && command.size() != 14) {
-        return -1;
-    }
-    if (command.size() != 14) {
-        command.insert(0, "0");
-    }
-    std::string result;
-    for (const auto & it : en_instructions) {
-        if ( it.second == command.substr(0, 2) )
-            result.append(it.first);
-    }
-    if (result.empty()) {
-        for (const auto & it : ua_instructions) {
-            if ( it.second == command.substr(0, 2) )
-                result.append(it.first);
-        }
-    }
-    if (result.empty()) {
-        std::cout << "Wrong input" << std::endl;
-        assert(false);
-    }
-    result.append(" " + command.substr(2, 4) + " " + command.substr(6, 4) + " " + command.substr(10, 4));
-    word_t Addr_1_mask_shift = (40-6-11)+1;
-    word_t Addr_1_mask = 0b11'111'111'111ULL << (Addr_1_mask_shift);
-    word_t Addr_2_mask_shift = (40-6-12-11)+1;
-    word_t Addr_2_mask = 0b11'111'111'111ULL << (Addr_2_mask_shift);
-//    std::cout << "NUM : " << std::bitset<41>(command_oct) << std::endl;
-//    std::cout << "TRUE : " << std::bitset<41>(0'11'0002'3067'0002ULL) << std::endl;
-    std::string val1 = std::to_string((word_to_number(kmem.read_memory(addr3.source_1)) )) + "  " +
-                       std::to_string(word_to_number(kmem.read_memory(addr3.source_1)) * std::pow(2, -40));  //* std::pow(2, -40)
-    std::string val2 = std::to_string(word_to_number(kmem.read_memory(addr3.source_2))) + "  " +
-                       std::to_string(word_to_number(kmem.read_memory(addr3.source_2)) * std::pow(2, -40) );
-    result.append("\t;; " + val1 + "\t" + val2);
-    // std::cout << result << std::endl;
-    addr_t a = (command_oct & Addr_2_mask) >> Addr_2_mask_shift;
-//    std::cout << "TRUE : " << std::bitset<41>(a) << std::endl;
-//    std::cout << "val2 : " << kmem.read_memory((command_oct & Addr_2_mask) >> Addr_2_mask_shift) << std::endl;
-    return 0;
+constexpr bool get_A1(word_t w){
+    constexpr word_t A_1_mask = 1ULL << (40-5);
+    return w & A_1_mask;
 }
 
-int disassembly_text(const std::string file_from, const std::string file_to) {
-    word_t Addr_1_mask_shift = (40-6-11)+1;
-    word_t Addr_1_mask = 0b11'111'111'111ULL << (Addr_1_mask_shift-1);
-    word_t Addr_2_mask_shift = (40-6-12-11)+1;
-    word_t Addr_2_mask = 0b11'111'111'111ULL << (Addr_2_mask_shift-1);
-    word_t oct_command;
-    std::map<std::string, std::string> program;
-    std::map<std::string, std::string> jumps;
-    size_t jump_counter = 0;
-
-    std::ifstream infile(file_from);
-
-    std::string line;
-
-    while (std::getline(infile, line)) {
-        line.erase(remove_if(line.begin(), line.end(), isspace), line.end());
-        std::ostringstream str;
-        str << std::oct << line;
-        std::string command = str.str();
-        std::string address = command.substr(0, 4);
-        command = command.substr(4);
-
-        if (command.size() != 13 && command.size() != 14) {
-            return -1;
-        }
-        if (command.size() != 14) {
-            command.insert(0, "0");
-        }
-        std::string result;
-
-        if (command.substr(0, 2) == "00") {
-            program[address] = command;
-            continue;
-        }
-
-        for (const auto &it: en_instructions) {
-            if (it.second == command.substr(0, 2)) {
-                result.append(it.first + " ");
-                std::string addr_1 = command.substr(2, 4) + " ";
-                std::string addr_2 = command.substr(6, 4) + " ";
-                std::string addr_3 = command.substr(10, 4) + " ";
-                std::string mod = mod_comment(addr_1, addr_2, addr_3);
-
-                if (it.first == "jle" || it.first == "jlea" || it.first == "je" || it.first == "ncall" ||
-                    it.first == "gob") {
-                    std::string label = "jump" + std::to_string(jump_counter++);
-                    jumps[addr_3.substr(0, 4)] = label + ":";
-
-                    result.append(addr_1);
-                    result.append(addr_2);
-                    result.append(label + " ");
-                } else if (it.first == "nfork" || it.first == "goe") {
-                    std::string label_1 = "jump" + std::to_string(jump_counter++);
-                    std::string label_2 = "jump" + std::to_string(jump_counter++);
-                    jumps[addr_2.substr(0, 4)] = label_1 + ":";
-                    jumps[addr_3.substr(0, 4)] = label_2 + ":";
-
-                    result.append(addr_1);
-                    result.append(label_1 + " ");
-                    result.append(label_2 + " ");
-                } else {
-                    result.append(addr_1);
-                    result.append(addr_2);
-                    result.append(addr_3);
-                }
-
-                if (mod != ";") {
-                    result.append("\t" + mod);
-                }
-            }
-//                if (result.empty()) {
-//                    for (const auto &it: ua_instructions) {
-//                        if (it.second == command.substr(0, 2))
-//                            result.append(it.first);
-//                    }
-//                }
-            if (result.empty()) {
-                std::cout << "Wrong input" << std::endl;
-                assert(false);
-            }
-            program[address] = result;
-        }
-    }
-    disassembler_second_pass(program, jumps, file_to);
-    return 0;
+constexpr bool get_A2(word_t w){
+    constexpr word_t A_2_mask = 1ULL << (40-5-12);
+    return w & A_2_mask;
 }
 
-int disassembler_second_pass(std::map<std::string, std::string> program, std::map<std::string, std::string> jumps, const std::string& file_to) {
-    std::string prog_to_file = "";
-    int last_address = std::stoi(program.begin()->first, 0, 8);
-    int origin_counter = 1;
-    prog_to_file.append("org0 " + program.begin()->first + "\n");
+constexpr bool get_A3(word_t w){
+    constexpr uint64_t A_3_mask = 1ULL << (40-5-24);
+    return w & A_3_mask;
+}
 
-    for(const auto & it : program) {
-        if(jumps.find(it.first) != jumps.end()) {
-            prog_to_file.append(jumps.find(it.first)->second + "\n");
-        }
-        if (std::stoi(it.first, 0, 8) - last_address > 1) {
-            prog_to_file.append("org" + std::to_string(origin_counter++) + " " + it.first + "\n");
-        }
-        last_address = std::stoi(it.first, 0, 8);   // not sure if I should initialize a new variable for this or leave it like that
-
-        prog_to_file.append("\t" + it.second + "\n");
-    }
-
-    std::ofstream infile(file_to);
-    if (!infile.is_open())
-        return -1;
-    infile << prog_to_file;
-    infile.close();
-
-    return 0;
+constexpr addr3_t shift_addr3_byA(addr3_t addr3, uint64_t offset, word_t w){
+    if(get_A1(w))
+        addr3.source_1 += offset;
+    if(get_A2(w))
+        addr3.source_2 += offset;
+    if(get_A3(w))
+        addr3.destination += offset;
+    return  addr3;
 }
 
 
-int check_modification(std::string addr) {
-    word_t mod_bit = 0b100'000'000'000ULL;
-    int num = std::stoi(addr, 0, 8);
+//! Returns: True -- continue, false -- ситуація останову.
+bool Kyiv_t::execute_opcode(){
+    K_reg = kmem.read_memory(C_reg);
+    std::cout << "Our command(binary): "<<std::bitset<41>(K_reg) << std::endl;
+    std::cout << "Our command(Kyive): "<<K_reg << std::endl;
+    opcode_t opcode = word_to_opcode(K_reg);
+    std::cout<<"Opcode: "<<opcode<<std::endl;
 
-    if (num & mod_bit) {
-        return num^mod_bit;
+    if (opcode == 0) {
+        ++C_reg;
+        std::cout << "No operation (opcode 0). Moving to the next command." << std::endl;
     }
-    return -1;
-}
+//    std::cout << "opcode: " << opcode << std::endl;
+    addr3_t addr3 = word_to_addr3(K_reg); // Парі команд потрібна
+    std::cout << "A_reg_2: " << A_reg << std::endl;
+    std::cout << "Cycle_reg: " << Loop_reg << std::endl;
+    addr3_t addr3_shifted = shift_addr3_byA(addr3, A_reg, K_reg); // Решта використовують цю змінну
 
-std::string mod_comment(std::string addr_1, std::string addr_2, std::string addr_3) {
-    std::string comment = ";";
-    int check = check_modification(addr_1);
+    std::cout << "Shifted addresses (source 1: " << addr3_shifted.source_1
+        << ", source 2: " << addr3_shifted.source_2
+        << ", destination: " << addr3_shifted.destination << ")" << std::endl;
+    // std::cout << "source 1: " << addr3_shifted.source_1 << std::endl;
+    // std::cout << "source 2: " << addr3_shifted.source_2 << std::endl;
 
-    if (check != -1) {
-        std::ostringstream str;
-        str << std::oct << check;
-        std::string to_print_1 = str.str();
-        comment.append(" Addr 1: " + to_print_1 + " + A; ");
-    }
+    disassembly(K_reg, kmem, addr3_shifted);
+    //! Ймовірно, потім це діло треба буде відрефакторити -- відчуваю, но де буде проблема - поки не знаю :+)
+    switch(opcode){
 
-    check = check_modification(addr_2);
-
-    if (check != -1) {
-        std::ostringstream str;
-        str << std::oct << check;
-        std::string to_print_1 = str.str();
-        comment.append(" Addr 2: " + to_print_1 + " + A; ");
-    }
-
-    check = check_modification(addr_3);
-
-    if (check != -1) {
-        std::ostringstream str;
-        str << std::oct << check;
-        std::string to_print_1 = str.str();
-        comment.append(" Addr 3: " + to_print_1 + " + A; ");
-    }
-    return comment;
-}
-
-class Assembly {
-    /*
-     * Class for reading and executing assembly code on Kyiv.
-     */
-private:
-    std::map<std::string, std::string> references;          // contains origins, labels
-    std::vector<std::string> readers;                       // helper for executing final code on Kyiv
-    std::vector<std::string> lines_cout;                    // Optional - saves command address
-    size_t command_count;                                   // helper to save current command address
-    size_t org_counter;                                     // helper to numerate origin
-    size_t end;                                             // helper to find address of last command
-    bool text;                                              // check if we input command or value
-    bool numer;                                             // Optional - if we want to address commands
-
-public:
-    /*
-     * Read file in assembly code, convert it into Kyiv code and write into output file.
-     * If numerate set in true -- output file will contain commands numeration.
-     * @param input filename as string, flag to indicate if we address commands as bool
-     * @return 0 if success
-     */
-    int read_file(const std::string& filename, bool numerate=false) {
-        references = {};
-        readers = {};
-        command_count = 0;
-        org_counter = 0;
-        numer = numerate;
-
-        std::ifstream infile(filename);
-        std::string line;
-        std::vector<std::string> commands;
-
-        while (std::getline(infile, line)) {
-            if (line.find(';') != std::string::npos)
-                line.erase(line.find_first_of(';')); // remove comment
-            if (!line.empty() && find_special_bts(line) == 0) {
-                commands.push_back(line);
-                if (numer) {
-                    std::ostringstream oct;
-                    oct << std::setw(4) << std::setfill('0') << std::oct << command_count;
-                    lines_cout.insert(lines_cout.begin(), oct.str());
-                    command_count++;
-                }
-                end++;
-            }
-        }
-        std::ostringstream oct;
-        oct << std::setw(4) << std::setfill('0') << std::oct << end;
-        references["org" + std::to_string(org_counter-1)] += oct.str() + "0000";
-        infile.close();
-        std::string res;
-        for (auto & command : commands) {
-            std::vector<std::string> argv;
-            boost::split(argv,command,boost::is_any_of(" "), boost::algorithm::token_compress_off);
-            if (references.find(argv[0]) != references.end()) {
-                readers.push_back(references[argv[0]]);
+        //TODO: Тестував лише opcode_add !!! -- решта вважайте невірними, поки не буде тестів. opcode_div
+        case arythm_operations_t::opcode_div: [[fallthrough]];
+        case arythm_operations_t::opcode_norm: [[fallthrough]];
+        case arythm_operations_t::opcode_add: [[fallthrough]];
+        case arythm_operations_t::opcode_sub: [[fallthrough]];
+        case arythm_operations_t::opcode_addcmd: [[fallthrough]];
+        case arythm_operations_t::opcode_subabs: [[fallthrough]];
+        case arythm_operations_t::opcode_mul: [[fallthrough]];
+        case arythm_operations_t::opcode_addcyc: [[fallthrough]];
+        case arythm_operations_t::opcode_mul_round:
+            opcode_arythm(addr3_shifted, opcode);
+            break;
+            //==========================================================================================================
+        case flow_control_operations_t::opcode_jmp_less_or_equal: [[fallthrough]];
+        case flow_control_operations_t::opcode_jmp_abs_less_or_equal: [[fallthrough]];
+        case flow_control_operations_t::opcode_jmp_equal: [[fallthrough]];
+        case flow_control_operations_t::opcode_fork_negative: [[fallthrough]];
+        case flow_control_operations_t::opcode_call_negative: [[fallthrough]];
+        case flow_control_operations_t::opcode_ret: [[fallthrough]];
+        case flow_control_operations_t::opcode_group_op_begin: [[fallthrough]];
+        case flow_control_operations_t::opcode_group_op_end: [[fallthrough]];
+        case flow_control_operations_t::opcode_F: [[fallthrough]];
+        case flow_control_operations_t::opcode_stop:
+            opcode_flow_control(addr3_shifted, opcode, addr3);
+            break;
+//==========================================================================================================
+        case logic_operations_t::opcode_log_shift:{
+            //! TODO: Мені не повністю зрозуміло з обох книг, величина зсуву береться із RAM за адресою,
+            //! чи закодована в команді? Швидше перше -- але перевірити!
+            word_t shift = kmem.read_memory(addr3_shifted.source_1) ; // Глушко-Ющенко, стор 12, сверджує: "на число разрядов,
+            // равное абсолютной величине константы сдвига, размещаемой в шести младших разрядах ячейки а1"
+            // 2^6 -- 64, тому решта бітів справді просто дадуть нуль на виході, але все рівно маскую, щоб
+            // не було невизначеної поведінки С. Та й зразу знак викидаємо
+            std::cout << "shift: " << shift << std::endl;
+            shift &= 0b111'111;
+            std::cout << "shift after some and: " << shift << std::endl;
+            if(is_negative(kmem.read_memory(addr3_shifted.source_1))) {
+                kmem.write_memory(addr3_shifted.destination, kmem.read_memory(addr3_shifted.source_2) >> shift);
             } else {
-                if (assembly_command(command, res) == -2) {
-                    res += (numer) ? lines_cout.back()+ "\t" : "";
-                    res += command + "\n";
+                kmem.write_memory(addr3_shifted.destination , kmem.read_memory(addr3_shifted.source_2) << shift);
+                kmem.write_memory(addr3_shifted.destination,  kmem.read_memory(addr3_shifted.destination) & (mask_40_bits | mask_41_bit)); // Зануляємо зайві біти
+            }
+            ++C_reg;
+        }
+            break;
+        case logic_operations_t::opcode_log_or:{
+            kmem.write_memory(addr3_shifted.destination, kmem.read_memory(addr3_shifted.source_1) | kmem.read_memory(addr3_shifted.source_2));
+            ++C_reg;
+            std::cout << "orr" << kmem.read_memory(addr3_shifted.destination) << std::endl;
+        }
+            break;
+        case logic_operations_t::opcode_log_xor:{
+            kmem.write_memory(addr3_shifted.destination, kmem.read_memory(addr3_shifted.source_1) ^ kmem.read_memory(addr3_shifted.source_2));
+            ++C_reg;
+        }
+            break;
+        case logic_operations_t::opcode_log_and:{
+
+            kmem.write_memory(addr3_shifted.destination, kmem.read_memory(addr3_shifted.source_1) & kmem.read_memory(addr3_shifted.source_2));
+
+            ++C_reg;
+        }
+            break;
+//==========================================================================================================
+        case IO_operations_t::opcode_read_perfo_data:{
+                std::ifstream punch_cards;
+                std::string line;
+                std::string perfo;
+                std::vector<std::string> argv;
+                signed_word_t number;
+
+                punch_cards.open("../../mem/punch_cards_in.txt");
+
+                int counter = 0;
+                int num_counter = 0;
+                bool flag;
+
+                while (punch_cards) {
+                    std::getline(punch_cards, line);
+                    if (counter == perfo_num) {
+                        perfo = line.substr(addr3_shifted.destination, line.size());
+                        boost::split(argv, perfo, boost::is_any_of(" "), boost::algorithm::token_compress_off);
+                        for(auto num : argv){
+                            if(num_counter == addr3_shifted.source_2 - addr3_shifted.source_1){
+                                flag = true;
+                                break;
+                            }
+                            number = std::stol(num, nullptr, 8);
+                            if(number >= 0){
+                                kmem.write_memory(addr3_shifted.source_1 + num_counter, number);
+                            }else{
+                                kmem.write_memory(addr3_shifted.source_1 + num_counter, to_negative(std::abs(number)));
+                            }
+                            num_counter++;
+                        }
+                    }else if(counter > num_counter){
+                        perfo = line;
+                        boost::split(argv, perfo, boost::is_any_of(" "), boost::algorithm::token_compress_off);
+                        for(auto num : argv){
+                            if(num_counter == addr3_shifted.source_2 - addr3_shifted.source_1){
+                                flag = true;
+                                break;
+                            }
+                            number = std::stoi(num, nullptr, 8);
+                            if (number >= 0) {
+                                kmem.write_memory(addr3_shifted.source_1 + num_counter, number);
+                            } else {
+                                kmem.write_memory(addr3_shifted.source_1 + num_counter, to_negative(std::abs(number)));
+                            }
+                            num_counter ++;
+                        }
+                    }
+                    if(flag == true){
+                        break;
+                    }
+                    counter++;
                 }
-                if (numer)
-                    lines_cout.pop_back();
-            }
+                punch_cards.close();
         }
-        write_file(outputf, res);
-        return 0;
-    }
+            break;
 
-    /*
-     * Check if we have any helper in line, such as origin, label, text or data section
-     * @param input line as string
-     * @return 0 if success
-     */
-    int find_special_bts(std::string &line) {
-        std::vector<std::string> argv;
-        boost::algorithm::trim(line);
-        boost::split(argv,line,boost::is_any_of(" "), boost::algorithm::token_compress_off);
-        if (argv[0] == ".text"){
-            text = true;
-            return 1;
-        }
-        else if (argv[0] == ".data") {
-            text = false;
-            return 1;
-        } else if (argv[0] == "org") { // 20/21 start end 0000
-            if (org_counter != 0) {
-                std::ostringstream oct;
-                oct << std::setw(4) << std::setfill('0') << std::oct << end;
-                references["org" + std::to_string(org_counter-1)] += oct.str() + "0000";
-            }
-            end = std::stoi(argv[1], 0, 8) - 1;
-            std::string com = text ? "21" : "20";
-            com += argv[1];
-            if (numer)
-                command_count =  std::stoi(argv[1]);
-            references["org" + std::to_string(org_counter)] = com;
-            line = "org" + std::to_string(org_counter++);
-        } else if (!text && argv.size() == 2) {
-            std::ostringstream oct;
-            oct << std::setw(4) << std::setfill('0') << std::oct << end;
-            references[argv[0]] = oct.str();
-            line = argv[1];
-        } else if (!text) {
-            if (stoi(argv[0]) == 1)
-                line = "1099511627775";
-            else
-                line = std::to_string( (int64_t) (stof(argv[0]) * std::pow(2, 40)));
+        case IO_operations_t::opcode_read_perfo_binary:{
+            std::ifstream punch_cards;
+            std::ifstream heads;
+            std::string head;
+            std::string line;
 
-        } else if (text && argv.size() == 1) {
-            std::ostringstream oct;
-            oct << std::setw(4) << std::setfill('0') << std::oct << end;
-            argv[0].pop_back();
-            references[argv[0]] = oct.str();
-            return 1;
-        }
-        return 0;
-    }
+            punch_cards.open("../punched_tape.txt");
+            heads.open("../heads.txt");
 
-    /*
-     * Check if given line contains command, if yes - convert it into Kyiv code and write into result line
-     * @param input line as string, result with Kyiv codes as string
-     * @return 0 if success, -2 if contains data
-     */
-    int assembly_command(std::string& command, std::string &result) {
-        std::vector<std::string> argv;
-        boost::split(argv,command,boost::is_any_of(" "), boost::algorithm::token_compress_off);
-        if (argv.size() != COMMAND_SIZE)
-            return -2;
-        for (uint8_t i = 1; i < COMMAND_SIZE; i++) {
-            if (argv[i].find_first_not_of("01234567") != std::string::npos) {
-                if (references.find(argv[i]) != references.end()) {
-                    std::cout << command << "\t" << argv[i] << std::endl;
-                    argv[i] = references.find(argv[i])->second;
-                } else {
-                    return -1;
+            std::getline(heads, head);
+            std::getline(heads, head);
+            // int num = std::stoi(head);
+            size_t num = h;
+            int counter = 0;
+            int com_counter = 0;
+            bool flag = false;
+
+            while(punch_cards){
+                std::getline(punch_cards, line);
+                int pos = 0;
+                if(counter == num){
+                    if(com_counter < addr3_shifted.source_2 - addr3_shifted.source_1){
+                        kmem.write_memory(addr3_shifted.source_1 + com_counter, std::stol(line, 0, 8));
+                        com_counter++;
+                    }else{
+                        flag = true;
+                        break;
+                    }
+                }else if(counter > num){
+                    if(com_counter < addr3_shifted.source_2 - addr3_shifted.source_1){
+                        kmem.write_memory(addr3_shifted.source_1 + com_counter, std::stol(line, 0, 8));
+                        com_counter ++;
+                    }else{
+                        flag = true;
+                        break;
+                    }
+
+                }
+                if(flag){
+                    break;
                 }
             }
-            if (argv[i].size() != COMMAND_SIZE)
-                return -1;
+            h += com_counter;
         }
-        if (en_instructions.find(argv[0]) != en_instructions.end())
-            argv[0] = en_instructions[argv[0]];
-        else if (ua_instructions.find(argv[0]) != ua_instructions.end())
-            argv[0] = ua_instructions[argv[0]];
-        else
-            return -1;
-        result += (numer && !lines_cout.empty()) ? lines_cout.back() + "\t": "";
-        result += boost::algorithm::join(argv, "") + "\n";
-        return 0;
+            break;
+
+        case IO_operations_t::opcode_read_magnetic_drum:{
+            std::ifstream magnetic_drum;
+            std::string line;
+            std::string data;
+            std::vector<std::string> argv;
+            signed_word_t number;
+
+            magnetic_drum.open("../../mem/drum_in.txt");
+
+            int counter = 0;
+            int num_counter = 0;
+            bool flag;
+            while (magnetic_drum) {
+                std::getline(magnetic_drum, line);
+                if(counter == drum_num_read){
+                    data = line.substr(drum_zone_read, line.size());
+                    boost::split(argv, data, boost::is_any_of(" "), boost::algorithm::token_compress_off);
+                    for(const auto& num : argv){
+                        if(num_counter == addr3_shifted.source_2 - addr3_shifted.source_1){
+                            flag = true;
+                            break;
+                        }
+                        number = std::stoi(num);
+                        if(number >= 0){
+                            kmem.write_memory(addr3_shifted.source_1 + num_counter, number);
+                        }else{
+                            kmem.write_memory(addr3_shifted.source_1 + num_counter, to_negative(std::abs(number)));
+                        }
+                        num_counter ++;
+                    }
+                }else if(counter > drum_num_read){
+                    data = line;
+                    boost::split(argv, data, boost::is_any_of(" "), boost::algorithm::token_compress_off);
+                    for(const auto& num : argv){
+                        if(num_counter == addr3_shifted.source_2 - addr3_shifted.source_1){
+                            flag = true;
+                            break;
+                        }
+                        number = std::stoi(num);
+                        if(number >= 0){
+                            kmem.write_memory(addr3_shifted.source_1 + num_counter, number);
+                        }else{
+                            kmem.write_memory(addr3_shifted.source_1 + num_counter, to_negative(std::abs(number)));
+                        }
+                        num_counter ++;
+                    }
+                }
+                if(flag){
+                    break;
+                }
+                counter ++;
+            }
+
+            magnetic_drum.close();
+        }
+            break;
+
+        case IO_operations_t::opcode_write_perfo_binary:{
+            std::ofstream myfile;
+            myfile.open("../punc_cards_out.txt");
+            if (myfile.is_open())
+            {
+                for(uint64_t i = 0; i <= addr3_shifted.source_2; i++){
+                    myfile << word_to_number(kmem.read_memory(addr3_shifted.source_1 + i));
+                    myfile << ' ';
+                }
+                myfile.close();
+            }else {
+                std::cout << "Unable to open file";
+            }
+            C_reg = addr3_shifted.destination;
+            K_reg = kmem.read_memory(C_reg);
+        }
+
+
+        case IO_operations_t::opcode_write_magnetic_drum:{
+            std::ofstream myfile;
+            myfile.open("../magnetic_drum.txt");
+            if (myfile.is_open())
+            {
+                for(uint64_t i = 0; i <= addr3_shifted.source_2; i++){
+                    myfile << word_to_number(kmem.read_memory(addr3_shifted.source_1 + i));
+                    myfile << ' ';
+                }
+                myfile.close();
+            }else {
+                std::cout << "Unable to open file";
+            }
+            C_reg = addr3_shifted.destination;
+            K_reg = kmem.read_memory(C_reg);
+        }
+            break;
+
+        case IO_operations_t::opcode_init_magnetic_drum:{
+            if (addr3_shifted.source_1 == 0) {
+                drum_num_read = addr3_shifted.source_2;
+                drum_zone_read = addr3_shifted.destination;
+            } else if (addr3_shifted.source_1 == 1) {
+                drum_num_write = addr3_shifted.source_2;
+                drum_zone_write = addr3_shifted.destination;
+            }
+        }
+            break;
+//==========================================================================================================
+        default:
+            T_reg = true; // ! TODO: Не пам'ятаю, яка там точно реакція на невідому команду
+    }
+    return !T_reg;
+}
+
+void Kyiv_t::opcode_arythm(const addr3_t& addr3, opcode_t opcode){
+    //! TODO: Додати перевірку на можливість запису. Що робила машина при спробі запису в ПЗП?
+    //! TODO: Додати перевірку на вихід за границю пам'яті -- воно ніби зациклювалося при тому
+    //! (зверталося до байта add mod 2^11, в сенсі), але точно не знаю.
+    signed_word_t sign1 = (is_negative(kmem.read_memory(addr3.source_1)) ? -1 : 1);
+    signed_word_t sign2 = (is_negative(kmem.read_memory(addr3.source_2)) ? -1 : 1);
+    // std::cout << "sign 2" << sign2 << std::endl;
+    // std::cout << "gfuigfalhf: " << addr3.source_2 << std::endl;
+    word_t abs_val1 = static_cast<signed_word_t>(kmem.read_memory(addr3.source_1) & mask_40_bits);
+    word_t abs_val2 = static_cast<signed_word_t>(kmem.read_memory(addr3.source_2) & mask_40_bits);
+    signed_word_t res = sign1 * (signed_word_t) abs_val1;
+
+    signed_word_t res_for_norm;
+    mul_word_t res_mul;
+    uint16_t power = 40 - leftmost_one(abs_val1) -1;
+
+    // std::cout << sign1 * (signed_word_t) abs_val1 << "gifhdaflvdjasbh\t" << sign2 * (signed_word_t) abs_val2 << std::endl;
+    std::cout << "Arithmetic operation: " << opcode
+          << "\nSource 1: " << addr3.source_1 << " (value Kyive: " << sign1 * (signed_word_t)abs_val1 << ")"<< " (value decimal: " << sign1 * ((signed_word_t)abs_val1*pow(2, -40)) << ")"
+          << "\nSource 2: " << addr3.source_2 << " (value Kyive: " << sign2 * (signed_word_t)abs_val2 << ")"<< " (value decimal: " << sign2 * ((signed_word_t)abs_val2*pow(2, -40)) << ")\n";
+    switch(opcode){
+        case arythm_operations_t::opcode_add:
+            res += sign2 * (signed_word_t) abs_val2;
+            std::cout << "Operation: Addition." << "\n";
+            if (sign2==1){
+                std::cout << "Kyive: " << sign1 * (signed_word_t) abs_val1 << " + " << sign2 * (signed_word_t) abs_val2 << " = " << res << std::endl;
+                std::cout << "Decimal: " << sign1 * ((signed_word_t) abs_val1 * pow(2, -40)) << " + " << sign2 * ((signed_word_t) abs_val2 * pow(2, -40)) << " = " << res * pow(2, -40) << std::endl;
+            } else {
+                std::cout << "Kyive: " << sign1 * (signed_word_t) abs_val1 << " + " << "("<<sign2 * (signed_word_t) abs_val2 <<")"<< " = " << res << std::endl;
+                std::cout << "Decimal: " << sign1 * ((signed_word_t) abs_val1 * pow(2, -40)) << " + "<< "(" << sign2 * ((signed_word_t) abs_val2 * pow(2, -40))<<")" << " = " << res * pow(2, -40) << std::endl;
+            }
+            break;
+        case arythm_operations_t::opcode_sub:
+            res -= sign2 * (signed_word_t) abs_val2;
+            std::cout << "Operation: Subtraction." << "\n";
+            if (sign2 == 1) {
+                std::cout << "Kyive: " << sign1 * (signed_word_t) abs_val1 << " - " << sign2 * (signed_word_t) abs_val2 << " = " << res << std::endl;
+                std::cout << "Decimal: " << sign1 * ((signed_word_t) abs_val1 * pow(2, -40)) << " - " << sign2 * ((signed_word_t) abs_val2 * pow(2, -40)) << " = " << res * pow(2, -40) << std::endl;
+            } else {
+                std::cout << "Kyive: " << sign1 * (signed_word_t) abs_val1 << " - " << "(" << sign2 * (signed_word_t) abs_val2 << ")" << " = " << res << std::endl;
+                std::cout << "Decimal: " << sign1 * ((signed_word_t) abs_val1 * pow(2, -40)) << " - " << "(" << sign2 * ((signed_word_t) abs_val2 * pow(2, -40)) << ")" << " = " << res * pow(2, -40) << std::endl;
+            }
+            break;
+        case arythm_operations_t::opcode_addcmd:
+            res += (signed_word_t) abs_val2;
+            std::cout << "Operation: Addition of commands." << "\n";
+            std::cout<<"Add first number to second without sign: "<<"\n";
+            std::cout << "Kyive: " << sign1 * (signed_word_t) abs_val1 << " + " <<  (signed_word_t) abs_val2 << " = " << res << std::endl;
+            std::cout << "Decimal: " << sign1 * ((signed_word_t) abs_val1 * pow(2, -40)) << " + " <<  ((signed_word_t) abs_val2 * pow(2, -40)) << " = " << res * pow(2, -40) << std::endl;
+            break;
+        case arythm_operations_t::opcode_subabs:
+            res = (signed_word_t) abs_val1 - (signed_word_t) abs_val2;
+            std::cout << "Operation: Modulus substraction" << "\n";
+            std::cout << "Kyive: " << "|"<<sign1 * (signed_word_t) abs_val1 << "|"<< " - " << "|" << sign2 * (signed_word_t) abs_val2 << "|" << " = " << res << std::endl;
+            std::cout << "Decimal: " << "|"<< sign1 * ((signed_word_t) abs_val1 * pow(2, -40)) << "|"<< " - " << "|"<< sign2 * ((signed_word_t) abs_val2 * pow(2, -40))<< "|"<< " = " << res * pow(2, -40) << std::endl;
+            break;
+        case arythm_operations_t::opcode_addcyc:
+            res += sign2 * (signed_word_t) abs_val2; // Те ж, що і для opcode_add, але подальша обробка інша
+            std::cout << "Operation: Cyclical addition." << "\n";
+            if (sign2==1){
+                std::cout << "Kyive: " << sign1 * (signed_word_t) abs_val1 << " + " << sign2 * (signed_word_t) abs_val2 << " = " << res << std::endl;
+                std::cout << "Decimal: " << sign1 * ((signed_word_t) abs_val1 * pow(2, -40)) << " + " << sign2 * ((signed_word_t) abs_val2 * pow(2, -40)) << " = " << res * pow(2, -40) << std::endl;
+            } else {
+                std::cout << "Kyive: " << sign1 * (signed_word_t) abs_val1 << " + " << "("<<sign2 * (signed_word_t) abs_val2 <<")"<< " = " << res << std::endl;
+                std::cout << "Decimal: " << sign1 * ((signed_word_t) abs_val1 * pow(2, -40)) << " + "<< "(" << sign2 * ((signed_word_t) abs_val2 * pow(2, -40))<<")" << " = " << res * pow(2, -40) << std::endl;
+            }
+            std::cout<<"In the end we check whether our result was negative, and add - in case if yes"<<std::endl;
+            break;
+        case arythm_operations_t::opcode_mul: [[fallthrough]];
+        case arythm_operations_t::opcode_mul_round:
+            res_mul = sign1 * (mul_word_t) abs_val1 * sign2 * (mul_word_t) abs_val2;
+            std::cout << "H : " << res_mul << std::endl;
+            break;
+        case arythm_operations_t::opcode_norm: {
+            res_for_norm = sign1 * (abs_val1 << power);
+        }
+            break;
+        case arythm_operations_t::opcode_div: {
+            if ((abs_val2 == 0) || (abs_val2 < abs_val1)) {
+                T_reg = true;
+                ++C_reg;
+                return;
+            }
+            res_mul = ((mul_word_t) abs_val1 << 40) / (mul_word_t) abs_val2;
+            // std::cout << "Div " << res_mul << std::endl;
+        }
+            break;
+
+        default:
+            assert(false && "Should never been here!");
     }
 
-    /*
-     * Write result to given file (punched tape, or perfocard)
-     * @param file name as pointer to char array, result as string
-     * @return 0 if success
-     */
-    int write_file(const char* filename, std::string &res) {
-        std::ofstream infile(filename);
-        if (!infile.is_open())
-            return -1;
-        infile << res;
-        infile.close();
-        return 0;
+    if(opcode == arythm_operations_t::opcode_add ||
+       opcode == arythm_operations_t::opcode_sub ||
+       opcode == arythm_operations_t::opcode_subabs     //! TODO: Я не плутаю, результат може мати знак?
+            ) {
+        //! TODO: До речі, а якщо переповнення, воно кінцевий регістр змінювало до останову, чи ні?
+        // Тут я зробив, ніби ні -- але ХЗ, могло. Щоб точно знати -- треба моделювати на рівні схем ;=) --
+        // як ви і поривалися. Але це не має бути важливим.
+        bool is_negative = (res < 0);
+        if (is_negative)
+            res = -res;
+        assert(res >= 0);
+        if (res & mask_41_bit) { // if sum & CPU1.mask_41_bit == 1 -- overflow to sign bit
+            T_reg = true;
+            ++C_reg;
+            return;
+        }
+        kmem.write_memory(addr3.destination, static_cast<uint64_t>(res) & mask_40_bits);
+        // std::cout << -1 * res << std::endl;
+        if (is_negative)
+            kmem.write_memory(addr3.destination, kmem.read_memory(addr3.destination) | mask_41_bit);
+        //! "Нуль, получаемый как разность двух равных чисел, имеет отрицательный знак" -- стор. 13 Глушко-Ющенко, опис УПЧ
+        if(opcode == arythm_operations_t::opcode_sub && res == 0
+           && abs_val2 == 0 //! TODO: Моє припущення -- перевірити!
+                ){
+            kmem.write_memory(addr3.destination, res | mask_41_bit);
+            std::cout << "NEGATIVE 0" << (res | mask_41_bit) << std::endl;
+        }
+    } else if(opcode == arythm_operations_t::opcode_addcmd){
+        kmem.write_memory(addr3.destination, static_cast<uint64_t>(res) & mask_40_bits);
+        if (res<0) {
+            std::cout<<"Since our result is negative,we will add 1 to our result:"<<"1 +"<<"("<<res<<")"<<" = "<<(kmem.read_memory(addr3.destination) & mask_40_bits)<<std::endl;
+        }
+        std::cout << "Result written to destination (without sign): "
+          << (kmem.read_memory(addr3.destination) & mask_40_bits)
+          << " (Decimal: " << word_to_number(kmem.read_memory(addr3.destination)) * pow(2, -40) << ")" << std::endl;
+        kmem.write_memory(addr3.destination, kmem.read_memory(addr3.destination) | (kmem.read_memory(addr3.source_2) & mask_41_bit)); // Копіюємо біт знаку з source_2 // edited тут наче так має бути
+        std::cout << "Final result written to destination (with sign): "
+          << kmem.read_memory(addr3.destination)
+          << " (Decimal: " << word_to_number(kmem.read_memory(addr3.destination)) * pow(2, -40) << ")" << std::endl;
+    } else if(opcode == arythm_operations_t::opcode_addcyc){
+        //! TODO: Вияснити, а як ця команда функціонує.
+        // "Отличается от обычного сложения лишь тем, что  в нем отсутствует блокировка при выходе
+        // из разполагаемого числа разрядов. Перенос из знакового разряда поступает в младший разряд
+        // сумматора".
+        // Питання (нумеруючи біти з 1 до 41):
+        // 1. Перенос із 40 в 41 біт тут можливий? З фрази виглядає, що так.
+        // 2. Якщо додавання переносу до молодшого біту виникло переповнення, що далі?
+        //    Так виглядає, що воно не може виникнути, але чи я не помилився? -- не може, десь через переніс буде 0
+        bool is_negative = (res < 0);
+        if (is_negative)
+            res = -res;
+        assert(res >= 0);
+
+        // std::cout << std::bitset<41> (res) << std::endl;
+        if(res & mask_41_bit){
+            res += 1; // Маємо перенос із знакового біту
+        }
+        kmem.write_memory(addr3.destination, static_cast<uint64_t>(res) & mask_40_bits);
+
+        std::cout<<"We will work with positive numbers"<<" (value Kyive: " << res << ")"<< " (value decimal: " << res*pow(2, -40) << ")"<<std::endl;
+        if (res*pow(2, -40)>1 ) {
+            std::cout<<"Our result out of range [-1,1]"<<std::endl;
+            std::cout<<"We need to sustruct 1 from our result Kyive:"<<res<<" - 1"<<" = "<< (kmem.read_memory(addr3.destination) & mask_40_bits)<<std::endl;
+            std::cout<<"We need to sustruct 1 from our result decimal:"<<res*pow(2, -40)<<" - 1"<<" = "<< (kmem.read_memory(addr3.destination) & mask_40_bits)*pow(2, -40)<<std::endl;
+        }
+        else {
+            std::cout<<"Our value belong to reange [-1,1], so it will stay unchanged"<<" (value Kyive: " << res << ")"<< " (value decimal: " << res*pow(2, -40) << ")"<<std::endl;
+        }
+        if (is_negative)
+            kmem.write_memory(addr3.destination, kmem.read_memory(addr3.destination) | mask_41_bit);
+
+    } else if(opcode == arythm_operations_t::opcode_mul ||
+              opcode == arythm_operations_t::opcode_mul_round
+            ) {
+        bool is_negative = (res_mul < 0);
+        //std::cout << res_mul << std::endl;
+        if (is_negative)
+            res_mul = -res_mul;
+        assert(res_mul >= 0);
+
+        uint16_t leftmost = leftmost_one(res_mul);
+
+        if (opcode == arythm_operations_t::opcode_mul_round) {
+            res_mul += 1ULL << 39;
+        }
+        res_mul = res_mul >> 40;
+
+        kmem.write_memory(addr3.destination, static_cast<uint64_t>(res_mul) & mask_40_bits);
+        std::cout << "DEBUUUUUUUUG2 " << static_cast<uint64_t>(res_mul) << std::endl;
+        // std::cout << is_negative << std::endl;
+        if (is_negative)
+            kmem.write_memory(addr3.destination, kmem.read_memory(addr3.destination) | mask_41_bit);
+        std::cout << "DEBUUUUUUUUG " << word_to_number(kmem.read_memory(addr3.destination)) << std::endl;
+//        std::cout << std::bitset<41>(kmem[addr3.destination]) << std::endl;
+//        std::cout << "Mult res: " << word_to_number(kmem[addr3.destination]) << std::endl;
+
+    } else if (opcode == arythm_operations_t::opcode_norm) {
+        bool is_negative = (res_for_norm < 0);
+
+        if (is_negative)
+            res_for_norm = -res_for_norm;
+        assert(res_for_norm >= 0);
+//
+//        std::cout << "norm_val: " << (res_for_norm) << std::endl;
+//        std::cout << "norm_power: " << (power) << std::endl;
+//        std::cout << "norm_val_64: " << std::bitset<64>(res_for_norm) << std::endl;
+//        std::cout << "norm_val_41: " << std::bitset<41>(res_for_norm) << std::endl;
+
+        kmem.write_memory(addr3.source_2, power);
+        kmem.write_memory(addr3.destination, static_cast<uint64_t>(res_for_norm) & mask_40_bits);
+        if (is_negative)
+            kmem.write_memory(addr3.destination, kmem.read_memory(addr3.destination) | mask_41_bit);
+//
+//        std::cout << "norm_val_mem: " << kmem[addr3.destination] << std::endl;
+//        std::cout << "norm_val_pow: " << kmem[addr3.source_2] << std::endl;
+    } else if (opcode == arythm_operations_t::opcode_div) {
+        kmem.write_memory(addr3.destination, static_cast<uint64_t>(res_mul) & mask_40_bits);
+        if ((sign1 * sign2) == -1)
+            kmem.write_memory(addr3.destination, kmem.read_memory(addr3.destination) | mask_41_bit);
+//        std::cout << "Div res: " << word_to_number(kmem[addr3.destination]) << std::endl;
     }
+    ++C_reg;
+}
 
-    /*
-     * Execute all commands that we convert from assembly into Kyiv codes
-     * @param struct Kyiv_t, address from which we start execution
-     * @return 0 if success
-     */
-    int execute(Kyiv_t & machine, const size_t start) {
-        for (auto & i : readers) {
-            machine.kmem.write_memory(0001, stol(i, 0, 8));
-            machine.C_reg = 1;
-            machine.execute_opcode();
+
+void Kyiv_t::opcode_flow_control(const addr3_t& addr3_shifted, opcode_t opcode, const addr3_t &addr3){
+    signed_word_t sign1 = (is_negative(kmem.read_memory(addr3_shifted.source_1)) ? -1 : 1);
+    signed_word_t sign2 = (is_negative(kmem.read_memory(addr3_shifted.source_2)) ? -1 : 1);
+    signed_word_t abs_val1 = static_cast<signed_word_t>(kmem.read_memory(addr3_shifted.source_1) & mask_40_bits);
+    signed_word_t abs_val2 = static_cast<signed_word_t>(kmem.read_memory(addr3_shifted.source_2) & mask_40_bits);;
+
+    switch (opcode) {
+        case flow_control_operations_t::opcode_jmp_less_or_equal: {
+            if((sign1 * abs_val1) <= (sign2 * abs_val2)){
+                C_reg = addr3_shifted.destination;
+            } else {
+                ++C_reg;
+            }
         }
-        machine.C_reg = start;
-        while (machine.execute_opcode()) {
-            std::cout << "\tRES: " << machine.kmem.read_memory(0015) << " - " << word_to_number(machine.kmem.read_memory(0015)) * std::pow(2, -40) <<  std::endl;
+            break;
+        case flow_control_operations_t::opcode_jmp_abs_less_or_equal: {
+//            std::cout << "Num1 " << get_absolute(kmem[addr3_shifted.source_1]) << std::endl;
+//            std::cout << "Num2 " << get_absolute(kmem[addr3_shifted.source_2]) << std::endl;
+            if (abs_val1 <= abs_val2) {
+                C_reg = addr3_shifted.destination;
+            } else {
+                ++C_reg;
+            }
         }
-        std::cout << "RES: " << machine.kmem.read_memory(0015) << " - " << machine.kmem.read_memory(0015) * std::pow(2, -40) <<  std::endl;
-        return 0;
+            break;
+        case flow_control_operations_t::opcode_jmp_equal: {
+            if( (sign1 * abs_val1) == (sign2 * abs_val2)){
+                C_reg = addr3_shifted.destination;
+            } else {
+                ++C_reg;
+            }
+        }
+            break;
+        case flow_control_operations_t::opcode_fork_negative: {
+            if( is_negative(kmem.read_memory(addr3_shifted.source_1)) ){
+                C_reg = addr3_shifted.destination;
+            }else{
+                C_reg = addr3_shifted.source_2;
+            }
+        }
+            break;
+        case flow_control_operations_t::opcode_call_negative:{
+            if( is_negative(kmem.read_memory(addr3_shifted.source_1)) ){
+                P_reg = addr3_shifted.source_2; //! TODO: Згідно тексту стор 342 (пункт 18) Гнеденко-Королюк-Ющенко-1961
+                //! Глушков-Ющенко, стор 13, УПП не до кінця однозначна -- a1 без штриха, це зрозуміло,
+                //! але з врахуванням A і біта модифікатора, чи без?
+                //! Виглядає, що в таблиці на стор 180 -- помилка ('A2 => P -- зайвий штрих точно помилка,
+                //! чи помилка, що, немає зсуву на А?).
+                //! Однак, в  Гнеденко-Королюк-Ющенко-1961 опкод (32) суперечить опкоду в Глушко-Ющенко.
+                //! Перевірити!
+                C_reg = addr3_shifted.destination;
+            }else{
+                ++C_reg; //! Тут P_reg не мала б змінювати
+            }
+        }
+            break;
+        case flow_control_operations_t::opcode_ret:{
+            C_reg = P_reg;
+        }
+            break;
+        case flow_control_operations_t::opcode_group_op_begin:{
+            // У книжці Глушков-Ющенко на ст. 14, ймовірно, помилка, бо навіть словами пояснено,
+            // що береться значення а1 і а2, але разом із тим наголошено, що береться не 'а1 чи 'а2,
+            // а саме а1 і а2. В кінці цієї книжки та у Гнеденко-Королюк-Ющенко пише,
+            // ніби беруться значення, тому тут реалізовано саме так.
+            Loop_reg =  addr3_shifted.source_1; //word_to_number(kmem.read_memory(addr3_shifted.source_1));
+            A_reg = addr3_shifted.source_2; // word_to_number(kmem.read_memory(addr3_shifted.source_2));
+            if (A_reg == Loop_reg) {
+                C_reg = addr3_shifted.destination;
+            } else {
+                ++C_reg;
+            }
+
+            std::cout << "A_reg: " << A_reg << std::endl;
+        }
+            break;
+        case flow_control_operations_t::opcode_group_op_end:{
+            // Такий самий прикол, як з НГО
+            // not a value
+            A_reg += addr3.source_1;// word_to_number(kmem.read_memory(addr3_shifted.source_1));
+            if (A_reg == Loop_reg) {
+                C_reg = word_to_number(addr3_shifted.destination);
+            } else {
+                C_reg = (addr3_shifted.source_2);
+            }
+        }
+            break;
+        case flow_control_operations_t::opcode_F:{
+            // Якщо я правильно розібралася з 2 попередними командами, то тут все зрозуміло і немає суперечностей
+            A_reg = word_to_addr3(kmem.read_memory(addr3_shifted.source_1)).source_2;
+            word_t res = kmem.read_memory(A_reg);
+            kmem.write_memory(addr3_shifted.destination, res);
+            ++C_reg;
+        }
+            break;
+        case flow_control_operations_t::opcode_stop:{ //! TODO: Вона враховує стан кнопки на пульті?
+            // From Glushkov-Iushchenko p. 55
+            // If B_tumb == 0 -> neutral mode -> full stop
+            // If B_tumb > 0 -> just skip one command without full stop
+            // From Glushkov-Iushchenko pp. 163-164
+            // If B_tumb == 1 -> stop by 3d address
+            // If B_tumb == 2 -> stop by command number
+            // I'm not sure what to do with 1st and 2nd B_tumb (maybe that should be handled in main???)
+            if (!B_tumb) {
+                T_reg = true;
+                ++C_reg;
+            }
+            else {
+                C_reg += 2;
+            }
+        }
+            break;
     }
-};
-struct MemoryInput {
-    uint64_t address;
-    uint64_t value;
-};
-
-int main(int argc, char *argv[]) {
-    std::ifstream infile("assembly");
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <mode> [arguments...]" << std::endl;
-        std::cerr << "Modes:" << std::endl;
-        std::cerr << "./kyivemu command <num1> <num2> <operation_code> " << std::endl;
-        std::cerr << "./kyivemu expression (<reg1>,<num1>) (<reg2>,<num2>) ... <C_reg> " << std::endl;
-        std::cerr<< "./kyivemu removable_memory <file> (<reg1>,<num1>) ... <C_reg> "<< std::endl;
-        std::filesystem::path docPath = std::filesystem::current_path() / "../documentation/documentation.txt";
-        std::cerr << "For a list of supported commands and detailed instructions, please refer to the documentation file: "
-                << "<a href=\"file://" << docPath.string() << "\">documentation.txt</a>." << std::endl;
-        return -1;
-    }
-    std::string mode = argv[1];
-    Kyiv_t machine;
-    if (mode == "command") {
-        if (argc != 5) {
-            std::cerr << "Usage: " << argv[0] << " command <num1> <num2> <operation_code> " << std::endl;
-            return -1;
-        }
-
-        word_t num1 = parse_kyiv_number(argv[2]);
-        word_t num2 = parse_kyiv_number(argv[3]);
-        opcode_t operation_code = std::stoi(argv[4], nullptr, 8); //ОСЬ ТУТ БАВ БАГ!!!
-
-        machine.kmem.write_memory(00001, num1);
-        machine.kmem.write_memory(00002, num2);
-
-        word_t command = (static_cast<word_t>(operation_code) << 36) // Код операції
-                         | (00001ULL << 24)                          // Адреса першого числа
-                         | (00002ULL << 12)                          // Адреса другого числа
-                         | 00003;                                    // Адреса результату
-
-        machine.kmem.write_memory(00004, command);
-
-        machine.C_reg = 00004;
-
-        while (machine.execute_opcode()) {
-            std::cout << "Result: "
-                      << word_to_number(machine.kmem.read_memory(00003))
-                      << "\n\n";
-        }
-
-    } else if (mode == "expression") {
-        std::vector<MemoryInput> memoryInputs;
-
-        for (int i = 2; i < argc - 1; ++i) {
-            std::string arg(argv[i]);
-            if (arg.front() != '(' || arg.back() != ')') {
-                std::cerr << "Invalid format for argument: " << arg << std::endl;
-                return -1;
-            }
-
-            arg = arg.substr(1, arg.size() - 2);
-            size_t commaPos = arg.find(',');
-            if (commaPos == std::string::npos) {
-                std::cerr << "Invalid format for argument: " << arg << std::endl;
-                return -1;
-            }
-
-            word_t address = std::stoull(arg.substr(0, commaPos));
-            word_t value = std::stoull(arg.substr(commaPos + 1));
-            memoryInputs.push_back({address, value});
-        }
-
-        for (const auto& input : memoryInputs) {
-            machine.kmem.write_memory(input.address, input.value);
-            std::cout << "Memory updated: Register " << input.address << " <- " << input.value << std::endl;
-        }
-
-        machine.C_reg = std::stoull(argv[argc - 1], nullptr, 8);
-
-        while (machine.execute_opcode()) {
-            std::cout << "Result: "<<
-                       word_to_number(machine.kmem.read_memory(00003)) * pow(2, -40)<<"\n"
-
-                      << "\n\n";
-        }
-
-
-    } else if (mode == "removable_memory") {
-        if (argc < 4) {
-            std::cerr << "Usage: " << argv[0] << " removable_memory <file> (<reg1>,<num1>) ... <C_reg>" << std::endl;
-            return -1;
-        }
-
-        std::string file = "../libs/" + std::string(argv[2]);
-        std::ifstream infile(file);
-        if (!infile) {
-            std::cerr << "Error: Unable to open file " << file << std::endl;
-            return -1;
-        }
-
-        std::string line;
-        while (std::getline(infile, line)) {
-            line.erase(remove_if(line.begin(), line.end(), isspace), line.end());
-            if (line.empty()) continue;
-
-            std::ostringstream str;
-            str << std::oct << line;
-            std::string data = str.str();
-            if (data.size() < 5) continue;
-
-            std::string address = data.substr(0, 4);
-            data = data.substr(4);
-            if (data.size() != 13 && data.size() != 14) {
-                continue;
-            }
-            if (data.size() != 14) {
-                data.insert(0, "0");
-            }
-            machine.kmem.write_rom(std::stoi(address, nullptr, 8), std::stol(data, nullptr, 8));
-        }
-
-        std::vector<MemoryInput> memoryInputs;
-        for (int i = 3; i < argc - 1; ++i) {
-            std::string arg(argv[i]);
-            if (arg.front() != '(' || arg.back() != ')') {
-                std::cerr << "Invalid format for argument: " << arg << std::endl;
-                return -1;
-            }
-
-            arg = arg.substr(1, arg.size() - 2);
-            size_t commaPos = arg.find(',');
-            if (commaPos == std::string::npos) {
-                std::cerr << "Invalid format for argument: " << arg << std::endl;
-                return -1;
-            }
-
-            word_t address = std::stoull(arg.substr(0, commaPos));
-            word_t value = std::stoull(arg.substr(commaPos + 1));
-            memoryInputs.push_back({address, value});
-        }
-
-        for (const auto& input : memoryInputs) {
-            machine.kmem.write_memory(input.address, input.value);
-            std::cout << "Memory updated: Register " << input.address << " <- " << input.value << std::endl;
-        }
-
-        machine.C_reg = std::stoull(argv[argc - 1], nullptr, 8);
-
-        while (machine.execute_opcode()) {
-            std::cout << "Result: "
-                      << word_to_number(machine.kmem.read_memory(00003)) * pow(2, -40)
-                      << "\n\n" << std::endl;
-            std::cout << "Result (Decimal): "
-                      << word_to_number(machine.kmem.read_memory(00003))
-                      << "\n\n";
-        }
-    }else {
-        std::cerr << "Unknown mode: " << mode << std::endl;
-        return -1;
-    }
-    return 0;
 }
