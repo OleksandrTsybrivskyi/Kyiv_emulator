@@ -8,7 +8,7 @@
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/multiprecision/cpp_int.hpp>
-#include <boost/multiprecision/float128.hpp>
+#include <boost/multiprecision/cpp_bin_float.hpp>
 #include "kyiv.h"
 #include "asm_disasm.h"
 typedef uint64_t addr_t;
