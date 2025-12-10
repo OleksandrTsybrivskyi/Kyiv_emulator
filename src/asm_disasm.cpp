@@ -604,13 +604,20 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
 
-            word_t address = std::stoull(arg.substr(0, commaPos));
+            word_t address = std::stoull(arg.substr(0, commaPos), nullptr, 8);
             word_t value = std::stoull(arg.substr(commaPos + 1));
             memoryInputs.push_back({address, value});
         }
 
         for (const auto& input : memoryInputs) {
-            machine.kmem.write_memory(input.address, input.value);
+            if (input.address >= 03000)
+            {
+                machine.kmem.write_rom(input.address, input.value);
+            }
+            else
+            {
+                machine.kmem.write_memory(input.address, input.value);
+            }
             std::cout << "Memory updated: Register " << input.address << " <- " << input.value << std::endl;
         }
 
@@ -624,6 +631,10 @@ int main(int argc, char *argv[]) {
                       << word_to_number(machine.kmem.read_memory(00003))
                       << "\n\n";
         }
+        for (int addr : {033, 034, 035}) {
+    std::cout << "Mem[" << addr << "] = " 
+              << word_to_number(machine.kmem.read_memory(addr)) << std::endl;
+}
     }else {
         std::cerr << "Unknown mode: " << mode << std::endl;
         return -1;
