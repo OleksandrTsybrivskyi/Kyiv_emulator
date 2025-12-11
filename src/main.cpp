@@ -554,9 +554,21 @@ void Kyiv_t::opcode_arythm(const addr3_t& addr3, opcode_t opcode){
             res = -res;
         assert(res >= 0);
         if (res & mask_41_bit) { // if sum & CPU1.mask_41_bit == 1 -- overflow to sign bit
-            T_reg = true;
-            ++C_reg;
-            return;
+            // Якщо тумблер блокування аварійного останову встановлений в 1
+            // то збільшуємо лічильник на 1. В кінці функції він збільшиться
+            // ще на 1, тому тут відбувається перестрибування 1 команди.
+            // Так і має бути. Якщо відбувся останов, але тумблер блокування
+            // останову встановлений на 1, то пропускається одна команда.
+            if (!B_tumb)
+            {
+                T_reg = true;
+                ++C_reg;
+                return;
+            }
+            else
+            {
+                ++C_reg;
+            }
         }
         kmem.write_memory(addr3.destination, static_cast<uint64_t>(res) & mask_40_bits);
         // std::cout << -1 * res << std::endl;
