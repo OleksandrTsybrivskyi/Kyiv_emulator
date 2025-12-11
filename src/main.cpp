@@ -117,6 +117,34 @@ constexpr addr3_t shift_addr3_byA(addr3_t addr3, uint64_t offset, word_t w){
     return  addr3;
 }
 
+/*
+Форматуємо вивід регістру команд
+Повертаємо бінарну стрічку розміром 41 біт розділену 
+на підстрічки розмірів 5, 12, 12, 12
+*/
+std::string format_K(uint64_t K) {
+    std::bitset<41> bits(K);        // 41 біт — як у машині "Київ"
+    std::string s = bits.to_string();
+
+    return s.substr(0, 5) + " " +
+           s.substr(5, 12) + " " +
+           s.substr(17, 12) + " " +
+           s.substr(29, 12);
+}
+
+/*
+Вивести вміст всіх регістрів
+*/
+void printRegisters(uint64_t C_reg, uint64_t K_reg, uint64_t P_reg,
+                     uint64_t Loop_reg, uint64_t A_reg, uint64_t B_tumb)
+{
+    std::cout << "C_reg:      " << std::oct << C_reg << std::dec << "\n";
+    std::cout << "K_reg:      " << format_K(K_reg) << "\n";
+    std::cout << "P_reg:      " << std::oct << P_reg << std::dec << "\n";
+    std::cout << "Loop_reg:   " << std::oct << Loop_reg << std::dec << "\n";
+    std::cout << "A_reg:      " << std::oct << A_reg << std::dec << "\n";
+    std::cout << "B_tumb:     " << (B_tumb ? 1 : 0) << "\n";
+}
 
 //! Returns: True -- continue, false -- ситуація останову.
 bool Kyiv_t::execute_opcode(){
@@ -132,8 +160,7 @@ bool Kyiv_t::execute_opcode(){
     }
 //    std::cout << "opcode: " << opcode << std::endl;
     addr3_t addr3 = word_to_addr3(K_reg); // Парі команд потрібна
-    std::cout << "A_reg_2: " << A_reg << std::endl;
-    std::cout << "Cycle_reg: " << Loop_reg << std::endl;
+    printRegisters(C_reg, K_reg, P_reg, Loop_reg, A_reg, B_tumb);
     addr3_t addr3_shifted = shift_addr3_byA(addr3, A_reg, K_reg); // Решта використовують цю змінну
 
     std::cout << "Shifted addresses (source 1: " << addr3_shifted.source_1
