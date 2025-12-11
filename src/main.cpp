@@ -775,6 +775,17 @@ void Kyiv_t::opcode_flow_control(const addr3_t& addr3_shifted, opcode_t opcode, 
         }
             break;
         case flow_control_operations_t::opcode_stop:{ //! TODO: Вона враховує стан кнопки на пульті?
+            // Відповідь: у книжці Глушков-Ющенко на с 164 пише про тумблер що дозволяє 
+            // робити пропуск 1 команди при виході за межі розрядної сітки.
+            // Думаю, тумблер останову, що має три положення, і тумблер блокування аварійного останову
+            // це різні тумблери, проте в коді це один B_thumb. А навіть якщо це один
+            // то ніде не знайшов, що він може блокувати команду останов. + до того,
+            // У режимі емуляції плаваючої крапки темблер блокування аварійного останову має
+            // бути включений. А якщо він би блокував саме команду останов, а не аварійний останов,
+            // то в режимі емуляції плаваючої крапки не можливо було би завершити роботу.
+            // прийнято рішення забрати код, що блукує команду установ, якщо тумблер блокування
+            // увімкнено.
+            //! TODO: Лише одне питання, чи має C_reg збільшуватися на 1 після команди останов
             // From Glushkov-Iushchenko p. 55
             // If B_tumb == 0 -> neutral mode -> full stop
             // If B_tumb > 0 -> just skip one command without full stop
@@ -782,13 +793,8 @@ void Kyiv_t::opcode_flow_control(const addr3_t& addr3_shifted, opcode_t opcode, 
             // If B_tumb == 1 -> stop by 3d address
             // If B_tumb == 2 -> stop by command number
             // I'm not sure what to do with 1st and 2nd B_tumb (maybe that should be handled in main???)
-            if (!B_tumb) {
-                T_reg = true;
-                ++C_reg;
-            }
-            else {
-                C_reg += 2;
-            }
+            T_reg = true;
+            ++C_reg;
         }
             break;
     }
